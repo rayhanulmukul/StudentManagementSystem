@@ -10,6 +10,8 @@ namespace StudentManagementSystem.Controllers
         private readonly IStudentService _studentService;
         private readonly ILogger<StudentsController> _logger;
         private const int PageSize = 10;
+        private const string SearchTermSessionKey = "Students.SearchTerm";
+        private const string PageNumberSessionKey = "Students.PageNumber";
 
         public StudentsController(IStudentService studentService, ILogger<StudentsController> logger)
         {
@@ -18,16 +20,37 @@ namespace StudentManagementSystem.Controllers
         }
 
         // GET: Students
-        public async Task<IActionResult> Index(string? searchTerm, int pageNumber = 1)
+        public async Task<IActionResult> Index(string? searchTerm, int? pageNumber)
         {
             try
             {
-                int totalCount = await _studentService.GetTotalStudentCountAsync(searchTerm);
-                var students = await _studentService.GetStudentsPaginatedAsync(pageNumber, PageSize, searchTerm);
+                var hasQueryState = Request.Query.ContainsKey("searchTerm") || Request.Query.ContainsKey("pageNumber");
 
-                ViewData["CurrentPage"] = pageNumber;
-                ViewData["TotalPages"] = (int)Math.Ceiling(totalCount / (double)PageSize);
-                ViewData["SearchTerm"] = searchTerm;
+                if (hasQueryState)
+                {
+                    var normalizedSearchTerm = NormalizeSearchTerm(searchTerm);
+                    var requestedPage = Math.Max(pageNumber ?? 1, 1);
+                    int requestedCount = await _studentService.GetTotalStudentCountAsync(normalizedSearchTerm);
+                    int requestedTotalPages = Math.Max(1, (int)Math.Ceiling(requestedCount / (double)PageSize));
+                    int correctedPage = Math.Min(requestedPage, requestedTotalPages);
+
+                    SetListState(normalizedSearchTerm, correctedPage);
+                    return RedirectToAction(nameof(Index));
+                }
+
+                var activeSearchTerm = HttpContext.Session.GetString(SearchTermSessionKey);
+                int requestedSessionPage = HttpContext.Session.GetInt32(PageNumberSessionKey) ?? 1;
+                int totalCount = await _studentService.GetTotalStudentCountAsync(activeSearchTerm);
+                int totalPages = Math.Max(1, (int)Math.Ceiling(totalCount / (double)PageSize));
+                int currentPage = Math.Min(Math.Max(requestedSessionPage, 1), totalPages);
+
+                SetListState(activeSearchTerm, currentPage);
+
+                var students = await _studentService.GetStudentsPaginatedAsync(currentPage, PageSize, activeSearchTerm);
+
+                ViewData["CurrentPage"] = currentPage;
+                ViewData["TotalPages"] = totalPages;
+                ViewData["SearchTerm"] = activeSearchTerm;
                 ViewData["TotalCount"] = totalCount;
 
                 return View(students.ToList());
@@ -211,62 +234,56 @@ namespace StudentManagementSystem.Controllers
             }
         }
 
-        // GET: Students/Search
-        public async Task<IActionResult> Search(string searchTerm)
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public IActionResult Search(string? searchTerm)
         {
-            if (string.IsNullOrWhiteSpace(searchTerm))
-            {
-                return RedirectToAction(nameof(Index));
-            }
-
-            try
-            {
-                var students = await _studentService.SearchStudentsAsync(searchTerm);
-                ViewData["SearchTerm"] = searchTerm;
-                return View("Index", students.ToList());
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error searching students");
-                return RedirectToAction(nameof(Index));
-            }
+            SetListState(NormalizeSearchTerm(searchTerm), 1);
+            return RedirectToAction(nameof(Index));
         }
 
-        // API endpoint for instant search without page reload
-        [HttpGet("api/students/search")]
-        [ResponseCache(Duration = 0)]
-        public async Task<IActionResult> SearchApi(string? searchTerm, int pageNumber = 1)
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public IActionResult ChangePage(int pageNumber)
         {
-            try
-            {
-                int totalCount = await _studentService.GetTotalStudentCountAsync(searchTerm);
-                var students = await _studentService.GetStudentsPaginatedAsync(pageNumber, PageSize, searchTerm);
+            var activeSearchTerm = HttpContext.Session.GetString(SearchTermSessionKey);
+            SetListState(activeSearchTerm, Math.Max(pageNumber, 1));
+            return RedirectToAction(nameof(Index));
+        }
 
-                return Json(new
-                {
-                    success = true,
-                    data = students.Select(s => new
-                    {
-                        s.Id,
-                        s.FirstName,
-                        s.LastName,
-                        s.FullName,
-                        s.Email,
-                        s.PhoneNumber,
-                        dateOfBirth = s.DateOfBirth.ToString("MMM dd, yyyy"),
-                        s.Status
-                    }),
-                    totalCount = totalCount,
-                    totalPages = (int)Math.Ceiling(totalCount / (double)PageSize),
-                    currentPage = pageNumber,
-                    pageSize = PageSize
-                });
-            }
-            catch (Exception ex)
+        [HttpPost]
+        [ValidateAntiForgeryToken]
+        public IActionResult ClearSearch()
+        {
+            ClearListState();
+            return RedirectToAction(nameof(Index));
+        }
+
+        private void SetListState(string? searchTerm, int pageNumber)
+        {
+            var normalizedSearchTerm = NormalizeSearchTerm(searchTerm);
+
+            if (string.IsNullOrEmpty(normalizedSearchTerm))
             {
-                _logger.LogError(ex, "Error searching students via API");
-                return Json(new { success = false, message = "Search failed" });
+                HttpContext.Session.Remove(SearchTermSessionKey);
             }
+            else
+            {
+                HttpContext.Session.SetString(SearchTermSessionKey, normalizedSearchTerm);
+            }
+
+            HttpContext.Session.SetInt32(PageNumberSessionKey, Math.Max(pageNumber, 1));
+        }
+
+        private void ClearListState()
+        {
+            HttpContext.Session.Remove(SearchTermSessionKey);
+            HttpContext.Session.Remove(PageNumberSessionKey);
+        }
+
+        private static string? NormalizeSearchTerm(string? searchTerm)
+        {
+            return string.IsNullOrWhiteSpace(searchTerm) ? null : searchTerm.Trim();
         }
     }
 }
